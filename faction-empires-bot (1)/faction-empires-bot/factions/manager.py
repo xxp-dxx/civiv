@@ -105,6 +105,35 @@ async def list_faction_members(faction_id: int):
     return await db.fetchall("SELECT * FROM members WHERE faction_id=?", (faction_id,))
 
 
+async def move_wanderer(guild_id: int, user_id: int, direction: str):
+    offsets = {"north": (0, -1), "south": (0, 1), "west": (-1, 0), "east": (1, 0)}
+    member = await get_member(guild_id, user_id)
+    if member["faction_id"]:
+        raise FactionError("Only wanderers can move this way.")
+    if direction not in offsets:
+        raise FactionError("Direction must be north, south, east, or west.")
+
+    cfg = await db.fetchone("SELECT * FROM guild_config WHERE guild_id=?", (guild_id,))
+    dx, dy = offsets[direction]
+    nx, ny = member["wander_x"] + dx, member["wander_y"] + dy
+    if nx < 0 or ny < 0 or nx >= cfg["map_width"] or ny >= cfg["map_height"]:
+        raise FactionError("You cannot move beyond the edge of the map.")
+
+    tile = await db.fetchone(
+        "SELECT * FROM tiles WHERE guild_id=? AND x=? AND y=?", (guild_id, nx, ny)
+    )
+    if not tile:
+        raise FactionError("That tile does not exist.")
+    if tile["biome"] == "ocean":
+        raise FactionError("Wanderers cannot move into open ocean.")
+
+    await db.execute(
+        "UPDATE members SET wander_x=?, wander_y=? WHERE guild_id=? AND user_id=?",
+        (nx, ny, guild_id, user_id)
+    )
+    return tile
+
+
 async def total_inhabitants(faction_row) -> int:
     decisioners = await db.fetchone(
         "SELECT COUNT(*) c FROM members WHERE faction_id=?", (faction_row["faction_id"],)
@@ -302,6 +331,123 @@ async def transfer_leadership(guild_id: int, current_leader_id: int, new_leader_
     raise FactionError(
         "That user must either be a member of your faction, or the leader of another active faction, to receive control."
     )
+
+
+# --------------------------------------------------------------------------
+# Inhabitant requests / population transfers
+# --------------------------------------------------------------------------
+
+async def create_inhabitant_request(
+    guild_id: int, requester_user_id: int, donor_faction_name: str,
+    inhabitants: int, food_offer: float = 0.0, treasury_offer: float = 0.0
+):
+    requester = await get_member_faction(guild_id, requester_user_id)
+    if not requester:
+        raise FactionError("You must be in a faction to request inhabitants.")
+    requester_member = await get_member(guild_id, requester_user_id)
+    if requester_member["role"] not in ("leader", "officer"):
+        raise FactionError("Only the faction leader or an officer can negotiate population transfers.")
+
+    donor = await get_faction_by_name(guild_id, donor_faction_name)
+    if not donor:
+        raise FactionError("No such target faction.")
+    if donor["faction_id"] == requester["faction_id"]:
+        raise FactionError("You cannot request inhabitants from your own faction.")
+    if inhabitants <= 0:
+        raise FactionError("Request at least 1 inhabitant.")
+    if food_offer < 0 or treasury_offer < 0:
+        raise FactionError("Resource offers cannot be negative.")
+    if inhabitants > donor["worker_count"]:
+        raise FactionError(
+            f"{donor['name']} only has {donor['worker_count']} transferable workers right now."
+        )
+    if food_offer > requester["food_stock"]:
+        raise FactionError("You do not have enough food for that offer.")
+    if treasury_offer > requester["treasury"]:
+        raise FactionError("You do not have enough money for that offer.")
+
+    cur = await db.execute(
+        "INSERT INTO inhabitant_requests "
+        "(guild_id, requester_faction_id, donor_faction_id, inhabitants, food_offer, treasury_offer, status, created_at) "
+        "VALUES (?,?,?,?,?,?, 'pending', ?)",
+        (guild_id, requester["faction_id"], donor["faction_id"], inhabitants,
+         food_offer, treasury_offer, _now()),
+    )
+    return await db.fetchone("SELECT * FROM inhabitant_requests WHERE request_id=?", (cur.lastrowid,))
+
+
+async def resolve_inhabitant_request(guild_id: int, donor_user_id: int, request_id: int, accept: bool):
+    request = await db.fetchone(
+        "SELECT * FROM inhabitant_requests WHERE guild_id=? AND request_id=? AND status='pending'",
+        (guild_id, request_id)
+    )
+    if not request:
+        raise FactionError("That inhabitant request is no longer pending.")
+
+    donor = await get_member_faction(guild_id, donor_user_id)
+    if not donor or donor["faction_id"] != request["donor_faction_id"]:
+        raise FactionError("Only members of the requested faction can answer this request.")
+    donor_member = await get_member(guild_id, donor_user_id)
+    if donor_member["role"] not in ("leader", "officer"):
+        raise FactionError("Only the donor faction's leader or an officer can answer this request.")
+
+    requester = await get_faction_by_id(request["requester_faction_id"])
+    if not requester:
+        raise FactionError("The requesting faction no longer exists.")
+
+    if not accept:
+        await db.execute(
+            "UPDATE inhabitant_requests SET status='declined' WHERE request_id=? AND status='pending'",
+            (request_id,)
+        )
+        return {"status": "declined", "request": request, "requester": requester, "donor": donor}
+
+    if donor["worker_count"] < request["inhabitants"]:
+        raise FactionError(f"{donor['name']} no longer has enough transferable workers.")
+    if requester["food_stock"] < request["food_offer"]:
+        raise FactionError("The requesting faction no longer has enough food for the promised offer.")
+    if requester["treasury"] < request["treasury_offer"]:
+        raise FactionError("The requesting faction no longer has enough money for the promised offer.")
+
+    async with db.transaction() as conn:
+        donor_update = await conn.execute(
+            "UPDATE factions SET worker_count=worker_count-? WHERE faction_id=? AND worker_count>=?",
+            (request["inhabitants"], donor["faction_id"], request["inhabitants"])
+        )
+        if donor_update.rowcount != 1:
+            raise FactionError("The donor faction no longer has enough workers.")
+
+        requester_update = await conn.execute(
+            "UPDATE factions SET food_stock=food_stock-?, treasury=treasury-?, worker_count=worker_count+? "
+            "WHERE faction_id=? AND food_stock>=? AND treasury>=?",
+            (request["food_offer"], request["treasury_offer"], request["inhabitants"],
+             requester["faction_id"], request["food_offer"], request["treasury_offer"])
+        )
+        if requester_update.rowcount != 1:
+            raise FactionError("The requesting faction no longer has the promised resources.")
+
+        await conn.execute(
+            "UPDATE factions SET food_stock=food_stock+?, treasury=treasury+? WHERE faction_id=?",
+            (request["food_offer"], request["treasury_offer"], donor["faction_id"])
+        )
+        status_update = await conn.execute(
+            "UPDATE inhabitant_requests SET status='accepted' WHERE request_id=? AND status='pending'",
+            (request_id,)
+        )
+        if status_update.rowcount != 1:
+            raise FactionError("That request was already resolved.")
+
+    await log_event(
+        guild_id,
+        requester["faction_id"],
+        f"Received {request['inhabitants']} workers from {donor['name']} for {request['food_offer']:.1f} food and {request['treasury_offer']:.1f} money.",
+    )
+    await log_event(
+        guild_id,
+        donor["faction_id"],
+        f"Transferred {request['inhabitants']} workers to {requester['name']} for {request['food_offer']:.1f} food and {request['treasury_offer']:.1f} money.",
+    )
+    return {"status": "accepted", "request": request, "requester": requester, "donor": donor}
 
 
 # --------------------------------------------------------------------------

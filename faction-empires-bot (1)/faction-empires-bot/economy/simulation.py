@@ -1,13 +1,4 @@
-"""
-The daily "tick" that advances a guild's world by one day:
-  1. Each faction produces food & money from its land + workers.
-  2. Inhabitants consume food; shortages cause starvation deaths.
-  3. Poor factions (low money-per-capita) lose workers to richer factions via migration.
-  4. Militia draw upkeep in food & money.
-  5. A snapshot of the map is stored ("memory" of the previous map).
-  6. There's a config.DISASTER_CHANCE chance of a catastrophe.
-  7. Per-faction stats are recorded for leaderboards & the leader dashboard.
-"""
+"""Daily simulation for Faction Empires."""
 import random
 from datetime import datetime, timezone
 
@@ -21,14 +12,26 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _stochastic_count(expected: float) -> int:
+    if expected <= 0:
+        return 0
+    whole = int(expected)
+    if random.random() < expected - whole:
+        whole += 1
+    return whole
+
+
+def _growth_rate(net_food: float, food_consumed: float) -> float:
+    if net_food <= 0 or food_consumed <= 0:
+        return 0.0
+    normalized_surplus = min(1.0, net_food / food_consumed)
+    return config.NATURAL_GROWTH_MAX_RATE * (normalized_surplus ** config.NATURAL_GROWTH_CURVE_EXPONENT)
+
+
 async def _production_for_faction(guild_id: int, faction: dict) -> tuple[float, float]:
-    """Returns (food_produced, money_produced) for one faction this tick, based on its
-    owned tiles' biome modifiers and its worker count."""
     tiles = await map_manager.get_faction_tiles(guild_id, faction["faction_id"])
     if not tiles or faction["worker_count"] <= 0:
         return 0.0, 0.0
-
-    # Workers are spread evenly across owned land for production purposes.
     workers_per_tile = faction["worker_count"] / len(tiles)
     food_total = 0.0
     money_total = 0.0
@@ -39,6 +42,49 @@ async def _production_for_faction(guild_id: int, faction: dict) -> tuple[float, 
     return food_total, money_total
 
 
+async def get_faction_economy(faction: dict) -> dict:
+    tiles = await map_manager.get_faction_tiles(faction["guild_id"], faction["faction_id"])
+    row = await db.fetchone("SELECT COUNT(*) c FROM members WHERE faction_id=?", (faction["faction_id"],))
+    decisioners = row["c"] if row else 0
+    inhabitants = faction["worker_count"] + faction["militia_count"] + decisioners
+
+    food_prod = 0.0
+    money_prod = 0.0
+    if tiles and faction["worker_count"] > 0:
+        workers_per_tile = faction["worker_count"] / len(tiles)
+        for tile in tiles:
+            food_mult, money_mult = config.BIOME_MODIFIERS.get(tile["biome"], (1.0, 1.0))
+            food_prod += workers_per_tile * config.FOOD_PER_WORKER_BASE * food_mult
+            money_prod += workers_per_tile * config.MONEY_PER_WORKER_BASE * money_mult
+
+    food_consumption = inhabitants * config.FOOD_CONSUMED_PER_CAPITA
+    militia_food_upkeep = faction["militia_count"] * config.MILITIA_FOOD_UPKEEP
+    total_food_consumed = food_consumption + militia_food_upkeep
+    net_food = food_prod - total_food_consumed
+    militia_money_upkeep = faction["militia_count"] * config.MILITIA_UPKEEP_MONEY
+    net_money = money_prod - militia_money_upkeep
+    growth_rate = _growth_rate(net_food, total_food_consumed)
+
+    return {
+        "decisioners": decisioners,
+        "inhabitants": inhabitants,
+        "food_prod": food_prod,
+        "money_prod": money_prod,
+        "food_consumption": food_consumption,
+        "militia_food_upkeep": militia_food_upkeep,
+        "total_food_consumed": total_food_consumed,
+        "net_food": net_food,
+        "militia_money_upkeep": militia_money_upkeep,
+        "net_money": net_money,
+        "growth_rate": growth_rate,
+        "growth_percent": growth_rate * 100.0,
+        "crisis": faction["worker_count"] <= 0 and inhabitants > 0,
+        "food_days": (
+            faction["food_stock"] / total_food_consumed if total_food_consumed > 0 else float("inf")
+        ),
+    }
+
+
 async def _apply_starvation(faction_id: int, food_stock: float) -> int:
     if food_stock >= 0:
         return 0
@@ -47,30 +93,41 @@ async def _apply_starvation(faction_id: int, food_stock: float) -> int:
     inhabitants = await faction_manager.total_inhabitants(faction)
     deaths = int(min(inhabitants, shortage * config.STARVATION_DEATH_RATE))
     if deaths > 0:
-        # Deaths come first from workers, since decisioners are real players.
         workers_lost = min(deaths, faction["worker_count"])
-        await faction_manager.adjust_worker_count(faction_id, -workers_lost)
-    # Reset food stock to 0 - can't go further negative, debt doesn't carry.
+        if workers_lost:
+            await faction_manager.adjust_worker_count(faction_id, -workers_lost)
     await db.execute("UPDATE factions SET food_stock=0 WHERE faction_id=?", (faction_id,))
     return deaths
 
 
+async def _apply_natural_population(faction_id: int) -> tuple[int, int, float]:
+    faction = await faction_manager.get_faction_by_id(faction_id)
+    if not faction or faction["worker_count"] <= 0:
+        return 0, 0, 0.0
+    economy = await get_faction_economy(faction)
+    births = _stochastic_count(faction["worker_count"] * economy["growth_rate"])
+    deaths = _stochastic_count(faction["worker_count"] * config.NATURAL_DEATH_RATE)
+    if births:
+        await faction_manager.adjust_worker_count(faction_id, births)
+    if deaths:
+        await faction_manager.adjust_worker_count(faction_id, -deaths)
+    return births, deaths, economy["growth_rate"]
+
+
 async def _apply_migration(guild_id: int, factions: list[dict]) -> dict[int, int]:
-    """Workers emigrate from poor factions to the richest faction in the same guild."""
     migrations = {}
     if len(factions) < 2:
         return migrations
 
     def money_per_capita(f):
-        inhabitants = f["worker_count"] + f["militia_count"] + 1  # +1 avoids div by zero, ignores decisioner count here for speed
+        inhabitants = f["worker_count"] + f["militia_count"] + 1
         return f["treasury"] / inhabitants
 
     richest = max(factions, key=money_per_capita)
     for f in factions:
         if f["faction_id"] == richest["faction_id"]:
             continue
-        mpc = money_per_capita(f)
-        if mpc < config.POVERTY_MONEY_PER_CAPITA_THRESHOLD and f["worker_count"] > 0:
+        if money_per_capita(f) < config.POVERTY_MONEY_PER_CAPITA_THRESHOLD and f["worker_count"] > 0:
             leaving = max(1, int(f["worker_count"] * config.MIGRATION_FRACTION))
             leaving = min(leaving, f["worker_count"])
             await faction_manager.adjust_worker_count(f["faction_id"], -leaving)
@@ -81,45 +138,53 @@ async def _apply_migration(guild_id: int, factions: list[dict]) -> dict[int, int
 
 
 async def run_tick(guild_id: int) -> dict:
-    """Advances one guild's world by exactly one day. Returns a summary dict for reporting."""
     cfg = await db.fetchone("SELECT * FROM guild_config WHERE guild_id=?", (guild_id,))
     if not cfg:
         raise ValueError("No world configured for this guild.")
 
     new_day = cfg["day_count"] + 1
     factions = await faction_manager.list_active_factions(guild_id)
-
     summary = {"day": new_day, "guild_id": guild_id, "factions": {}, "disaster": None, "migrations": {}}
-
-    # 1 & 4: production + upkeep
     inhabitants_before = {}
+
     for f in factions:
         inhabitants_before[f["faction_id"]] = await faction_manager.total_inhabitants(f)
-        food_prod, money_prod = await _production_for_faction(guild_id, f)
-        militia_food_upkeep = f["militia_count"] * config.MILITIA_FOOD_UPKEEP
-        militia_money_upkeep = f["militia_count"] * config.MILITIA_UPKEEP_MONEY
-        consumption = await faction_manager.total_inhabitants(f) * config.FOOD_CONSUMED_PER_CAPITA
-
-        net_food = food_prod - consumption - militia_food_upkeep
-        net_money = money_prod - militia_money_upkeep
-
-        await faction_manager.adjust_food(f["faction_id"], net_food)
-        await faction_manager.adjust_treasury(f["faction_id"], net_money)
-
+        economy = await get_faction_economy(f)
+        await faction_manager.adjust_food(f["faction_id"], economy["net_food"])
+        await faction_manager.adjust_treasury(f["faction_id"], economy["net_money"])
         summary["factions"][f["faction_id"]] = {
-            "name": f["name"], "food_prod": food_prod, "money_prod": money_prod,
-            "food_consumed": consumption + militia_food_upkeep, "deaths": 0, "migration": 0,
+            "name": f["name"],
+            "food_prod": economy["food_prod"],
+            "money_prod": economy["money_prod"],
+            "food_consumed": economy["total_food_consumed"],
+            "net_food": economy["net_food"],
+            "food_stock": f["food_stock"] + economy["net_food"],
+            "deaths": 0,
+            "natural_deaths": 0,
+            "births": 0,
+            "migration": 0,
+            "growth_rate": economy["growth_rate"],
+            "crisis": False,
         }
 
-    # 2: starvation (re-fetch since food_stock just changed)
     for f in factions:
         fresh = await faction_manager.get_faction_by_id(f["faction_id"])
         if fresh is None:
             continue
-        deaths = await _apply_starvation(f["faction_id"], fresh["food_stock"])
-        summary["factions"][f["faction_id"]]["deaths"] = deaths
+        summary["factions"][f["faction_id"]]["deaths"] += await _apply_starvation(
+            f["faction_id"], fresh["food_stock"]
+        )
 
-    # 3: migration
+    for f in factions:
+        if await faction_manager.get_faction_by_id(f["faction_id"]) is None:
+            continue
+        births, natural_deaths, growth_rate = await _apply_natural_population(f["faction_id"])
+        data = summary["factions"][f["faction_id"]]
+        data["births"] = births
+        data["natural_deaths"] = natural_deaths
+        data["deaths"] += natural_deaths
+        data["growth_rate"] = growth_rate
+
     fresh_factions = await faction_manager.list_active_factions(guild_id)
     migrations = await _apply_migration(guild_id, fresh_factions)
     summary["migrations"] = migrations
@@ -127,17 +192,18 @@ async def run_tick(guild_id: int) -> dict:
         if fid in summary["factions"]:
             summary["factions"][fid]["migration"] = delta
 
-    # 5: disaster
-    disaster = await map_manager.maybe_trigger_disaster(guild_id, new_day)
-    summary["disaster"] = disaster
+    summary["disaster"] = await map_manager.maybe_trigger_disaster(guild_id, new_day)
 
-    # 6: stats history + inhabitants delta
     final_factions = await faction_manager.list_active_factions(guild_id)
     for f in final_factions:
         land_count = await map_manager.count_faction_land(guild_id, f["faction_id"])
         inhabitants_now = await faction_manager.total_inhabitants(f)
         before = inhabitants_before.get(f["faction_id"], inhabitants_now)
         stat = summary["factions"].get(f["faction_id"], {"food_prod": 0, "money_prod": 0, "food_consumed": 0})
+        economy = await get_faction_economy(f)
+        stat["food_stock"] = f["food_stock"]
+        stat["net_food"] = economy["net_food"]
+        stat["crisis"] = economy["crisis"]
         await db.execute(
             "INSERT INTO stats_history (guild_id, faction_id, day, food_prod, money_prod, food_consumed, "
             "inhabitants, inhabitants_delta, land_count) VALUES (?,?,?,?,?,?,?,?,?) "
@@ -148,22 +214,21 @@ async def run_tick(guild_id: int) -> dict:
              inhabitants_now, inhabitants_now - before, land_count),
         )
 
-    # 7: snapshot + advance day counter
     await map_manager.snapshot_map(guild_id, new_day)
     await db.execute(
-        "UPDATE guild_config SET day_count=?, last_tick_at=? WHERE guild_id=?", (new_day, _now(), guild_id)
+        "UPDATE guild_config SET day_count=?, last_tick_at=? WHERE guild_id=?",
+        (new_day, _now(), guild_id)
     )
-
     return summary
 
 
 async def get_faction_dashboard(faction_id: int, days: int = 7):
-    """Leader-facing analytics: recent production per capita and inhabitant gain/loss."""
     faction = await faction_manager.get_faction_by_id(faction_id)
     if not faction:
         return None
     history = await db.fetchall(
-        "SELECT * FROM stats_history WHERE faction_id=? ORDER BY day DESC LIMIT ?", (faction_id, days)
+        "SELECT * FROM stats_history WHERE faction_id=? ORDER BY day DESC LIMIT ?",
+        (faction_id, days)
     )
     inhabitants = await faction_manager.total_inhabitants(faction)
     land = await map_manager.count_faction_land(faction["guild_id"], faction_id)
