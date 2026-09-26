@@ -21,11 +21,29 @@ def _stochastic_count(expected: float) -> int:
     return whole
 
 
-def _growth_rate(net_food: float, food_consumed: float) -> float:
-    if net_food <= 0 or food_consumed <= 0:
+def _growth_rate(net_food: float, food_consumed: float, food_stock: float) -> float:
+    """Return natural worker growth from food security and current reserves.
+
+    Daily surplus controls the growth curve, but positive reserves provide a
+    baseline level of food security even when production only breaks even or
+    runs a temporary deficit. Growth falls to zero when reserves are exhausted.
+    """
+    if food_consumed <= 0 or food_stock <= 0:
         return 0.0
-    normalized_surplus = min(1.0, net_food / food_consumed)
-    return config.NATURAL_GROWTH_MAX_RATE * (normalized_surplus ** config.NATURAL_GROWTH_CURVE_EXPONENT)
+
+    reserve_factor = min(1.0, food_stock / (food_consumed * config.NATURAL_GROWTH_RESERVE_DAYS))
+    normalized_balance = net_food / food_consumed
+    surplus_score = min(
+        1.0,
+        max(0.0, (normalized_balance + config.NATURAL_GROWTH_DEFICIT_TOLERANCE)
+                / (1.0 + config.NATURAL_GROWTH_DEFICIT_TOLERANCE)),
+    )
+    curved_surplus = surplus_score ** config.NATURAL_GROWTH_CURVE_EXPONENT
+    growth_pressure = (
+        config.NATURAL_GROWTH_BASE_FACTOR
+        + (1.0 - config.NATURAL_GROWTH_BASE_FACTOR) * curved_surplus
+    )
+    return config.NATURAL_GROWTH_MAX_RATE * reserve_factor * growth_pressure
 
 
 async def _production_for_faction(guild_id: int, faction: dict) -> tuple[float, float]:
@@ -63,7 +81,7 @@ async def get_faction_economy(faction: dict) -> dict:
     net_food = food_prod - total_food_consumed
     militia_money_upkeep = faction["militia_count"] * config.MILITIA_UPKEEP_MONEY
     net_money = money_prod - militia_money_upkeep
-    growth_rate = _growth_rate(net_food, total_food_consumed)
+    growth_rate = _growth_rate(net_food, total_food_consumed, faction["food_stock"])
 
     return {
         "decisioners": decisioners,
