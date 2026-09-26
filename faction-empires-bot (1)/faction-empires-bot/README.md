@@ -183,5 +183,5 @@ replace any single piece without untangling the rest.
 - The terrain itself never changes after world generation — only ownership,
   population, and disasters evolve day to day. Re-running
   `/admin init_world` regenerates everything from scratch (destructive).
-- No fog-of-war persistence — `/military scout` reveals the current state
-  live rather than storing what you "know" versus reality.
+- No fog-of-war persistence — the public map shows current terrain and faction
+  ownership directly, so wanderers and factions do not have a separate intel layer.
