@@ -17,8 +17,8 @@ BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DB_PATH = os.environ.get("FACTION_BOT_DB", os.path.join(os.path.dirname(__file__), "data", "world.db"))
 
 # --- Map ---
-MAP_WIDTH = 48
-MAP_HEIGHT = 48
+MAP_WIDTH = 96
+MAP_HEIGHT = 96
 STARTER_LAND_TILES = 6          # how many tiles a brand new faction starts with
 MAX_MAP_RENDER_PX = 640         # rendered PNG size (square)
 
@@ -61,6 +61,10 @@ STARVATION_DEATH_RATE = 0.02
 
 # Migration: if a faction's money-per-capita falls below this, some workers emigrate
 # to the richest faction in the same guild with better money-per-capita.
+NATURAL_GROWTH_MAX_RATE = 0.05
+NATURAL_GROWTH_CURVE_EXPONENT = 2.5
+NATURAL_DEATH_RATE = 0.002       # 0.2% of workers per simulated day, stochastic
+
 POVERTY_MONEY_PER_CAPITA_THRESHOLD = 0.15
 MIGRATION_FRACTION = 0.05         # fraction of workers that leave per tick when poor
 
@@ -82,8 +86,6 @@ TERRAIN_DEFENSE_BONUS = {          # defender bonus by biome of the contested ti
     "desert": 0.05,
     "ocean": 1.0,  # effectively unconquerable
 }
-SCOUT_MILITIA_COST = 5
-SCOUT_LOSS_CHANCE = 0.05
 ATTACK_COOLDOWN_HOURS = 12
 CONQUER_COOLDOWN_HOURS = 6
 

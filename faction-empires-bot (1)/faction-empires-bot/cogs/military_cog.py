@@ -2,83 +2,300 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import config
+from factions import manager as faction_manager
 from military import manager as military_manager
+from world import map_manager
+
+
+class ConquestMilitiaModal(discord.ui.Modal, title="Conquest Force"):
+    militia = discord.ui.TextInput(
+        label="Militia to commit",
+        placeholder="Enter the exact number of militia to commit",
+        min_length=1,
+        max_length=8,
+        required=True,
+    )
+
+    def __init__(self, guild_id: int, user_id: int, x: int, y: int):
+        super().__init__()
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.x = x
+        self.y = y
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(str(self.militia.value).strip())
+            result = await military_manager.conquer(
+                self.guild_id,
+                self.user_id,
+                self.x,
+                self.y,
+                amount,
+            )
+        except (ValueError, military_manager.MilitaryError) as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+
+        if result["success"]:
+            message = (
+                f"🏴 **Success.** Tile ({self.x},{self.y}) [{result['tile']['biome']}] "
+                f"is now yours. Committed {result['militia_committed']} militia; "
+                f"lost {result['militia_lost']}."
+            )
+            if result.get("wanderers_joined"):
+                message += (
+                    f"\n{len(result['wanderers_joined'])} wanderer(s) on that tile "
+                    "joined your faction."
+                )
+        else:
+            message = (
+                f"💀 **Failed.** Tile ({self.x},{self.y}) was not conquered. "
+                f"Committed {result['militia_committed']} militia; lost {result['militia_lost']}. "
+                f"Estimated success chance: {result['chance'] * 100:.0f}%."
+            )
+
+        await interaction.response.send_message(message)
+
+
+class ConquestView(discord.ui.View):
+    PAGE_SIZE = 25
+
+    def __init__(self, owner_id: int, candidates: list[dict]):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+        self.candidates = candidates
+        self.page = 0
+
+        self.target_select = discord.ui.Select(
+            placeholder="Choose a frontier tile",
+            min_values=1,
+            max_values=1,
+        )
+        self.add_item(self.target_select)
+        self.target_select.callback = self._select_target
+        self._refresh()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This conquest menu belongs to someone else.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _page_items(self):
+        start = self.page * self.PAGE_SIZE
+        return self.candidates[start:start + self.PAGE_SIZE]
+
+    def _refresh(self):
+        options = []
+        for item in self._page_items():
+            owner = item["owner_name"]
+            label = f"({item['x']},{item['y']}) · {item['biome']}"
+            description = (
+                f"Owned by {owner}"
+                if owner != "Unclaimed"
+                else "Unclaimed land"
+            )
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    description=description[:100],
+                    value=f"{item['x']}:{item['y']}",
+                )
+            )
+
+        self.target_select.options = options
+        if hasattr(self, "previous"):
+            self.previous.disabled = self.page <= 0
+        if hasattr(self, "next"):
+            self.next.disabled = (
+                (self.page + 1) * self.PAGE_SIZE >= len(self.candidates)
+            )
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._refresh()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._refresh()
+        await interaction.response.edit_message(view=self)
+
+    async def _select_target(self, interaction: discord.Interaction):
+        raw = self.target_select.values[0]
+        x, y = (int(value) for value in raw.split(":", 1))
+        self.stop()
+        await interaction.response.send_modal(
+            ConquestMilitiaModal(
+                interaction.guild_id,
+                interaction.user.id,
+                x,
+                y,
+            )
+        )
+
+
+class AttackMilitiaModal(discord.ui.Modal, title="Commit Attack Force"):
+    militia = discord.ui.TextInput(
+        label="Militia to commit",
+        placeholder="Enter the exact number of militia to commit",
+        min_length=1,
+        max_length=8,
+        required=True,
+    )
+
+    def __init__(self, guild_id: int, user_id: int, target_faction: str):
+        super().__init__()
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.target_faction = target_faction
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(str(self.militia.value).strip())
+            result = await military_manager.attack_faction(
+                self.guild_id,
+                self.user_id,
+                self.target_faction,
+                amount,
+            )
+        except (ValueError, military_manager.MilitaryError) as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+
+        if result["attacker_wins"]:
+            message = (
+                f"⚔️ Victory over **{result['target']}**. "
+                f"Captured {result['tiles_captured']} tile(s) and "
+                f"plundered {result['plunder']:.1f} money. "
+                f"Lost {result['attacker_losses']} militia; "
+                f"enemy lost {result['defender_losses']}."
+            )
+        else:
+            message = (
+                f"🩸 Defeat against **{result['target']}**. "
+                f"Lost {result['attacker_losses']} militia; "
+                f"enemy lost {result['defender_losses']}."
+            )
+
+        await interaction.response.send_message(message)
 
 
 class MilitaryCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    military_group = app_commands.Group(name="military", description="Militia, scouting, conquest and warfare.")
+    military_group = app_commands.Group(
+        name="military",
+        description="Militia, conquest and warfare.",
+    )
 
-    @military_group.command(name="convert", description="Convert workers into militia.")
+    @military_group.command(
+        name="convert",
+        description="Convert workers into militia.",
+    )
     async def convert(self, interaction: discord.Interaction, workers: int):
         await interaction.response.defer()
         try:
-            faction = await military_manager.convert_to_militia(interaction.guild_id, interaction.user.id, workers)
+            faction = await military_manager.convert_to_militia(
+                interaction.guild_id,
+                interaction.user.id,
+                workers,
+            )
         except military_manager.MilitaryError as e:
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return
+
         await interaction.followup.send(
-            f"⚔️ Converted {workers} workers into militia. **{faction['name']}** now has "
-            f"{faction['militia_count']} militia and {faction['worker_count']} workers."
+            f"⚔️ Converted {workers} workers into militia. "
+            f"**{faction['name']}** now has {faction['militia_count']} militia "
+            f"and {faction['worker_count']} workers."
         )
 
-    @military_group.command(name="scout", description="Scout adjacent tiles to reveal terrain and ownership.")
-    async def scout(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            result = await military_manager.scout(interaction.guild_id, interaction.user.id)
-        except military_manager.MilitaryError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-        if not result["intel"]:
-            await interaction.followup.send("Scouts found no adjacent unclaimed or enemy land - you may be surrounded, or own the whole continent!")
-            return
-        lines = [f"({t['x']},{t['y']}) — {t['biome']} — owner: {t['owner']}" for t in result["intel"]]
-        msg = "\n".join(lines)
-        if result["militia_lost"]:
-            msg += f"\n\n⚠️ Lost {result['militia_lost']} militia in a scouting mishap."
-        embed = discord.Embed(title="🔭 Scouting Report", description=msg, color=config.EMBED_COLOR_DEFAULT)
-        await interaction.followup.send(embed=embed)
-
-    @military_group.command(name="conquer", description="Attempt to conquer an adjacent tile (unclaimed or enemy-owned).")
-    async def conquer(self, interaction: discord.Interaction, x: int, y: int):
-        await interaction.response.defer()
-        try:
-            result = await military_manager.conquer(interaction.guild_id, interaction.user.id, x, y)
-        except military_manager.MilitaryError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-        if result["success"]:
-            msg = f"🏴 Success! Tile ({x},{y}) [{result['tile']['biome']}] is now yours. Lost {result['militia_lost']} militia."
-            if result.get("wanderers_joined"):
-                msg += f"\n{len(result['wanderers_joined'])} wanderer(s) on that tile joined your faction!"
-        else:
-            msg = f"💀 The conquest of ({x},{y}) failed (chance was {result['chance']*100:.0f}%). Lost {result['militia_lost']} militia."
-        await interaction.followup.send(msg)
-
-    @military_group.command(name="attack", description="Attack another faction directly with committed militia.")
-    async def attack(self, interaction: discord.Interaction, target_faction: str, militia: int):
-        await interaction.response.defer()
-        try:
-            result = await military_manager.attack_faction(interaction.guild_id, interaction.user.id, target_faction, militia)
-        except military_manager.MilitaryError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-        if result["attacker_wins"]:
-            msg = (
-                f"⚔️ Victory over **{result['target']}**! Captured {result['tiles_captured']} tile(s) and "
-                f"plundered {result['plunder']:.1f} money. Lost {result['attacker_losses']} militia; "
-                f"enemy lost {result['defender_losses']} militia."
+    @military_group.command(
+        name="conquer",
+        description="Choose an adjacent tile, then choose the militia force to commit.",
+    )
+    async def conquer(self, interaction: discord.Interaction):
+        faction = await faction_manager.get_member_faction(
+            interaction.guild_id,
+            interaction.user.id,
+        )
+        if not faction:
+            await interaction.response.send_message(
+                "You must be in a faction to conquer land.",
+                ephemeral=True,
             )
-        else:
-            msg = (
-                f"🩸 Defeat against **{result['target']}**. Lost {result['attacker_losses']} militia; "
-                f"enemy lost {result['defender_losses']} militia."
+            return
+
+        candidates = await map_manager.get_adjacent_unclaimed_or_enemy(
+            interaction.guild_id,
+            faction["faction_id"],
+        )
+        if not candidates:
+            await interaction.response.send_message(
+                "There are no adjacent unclaimed or enemy tiles available.",
+                ephemeral=True,
             )
-        await interaction.followup.send(msg)
+            return
+
+        factions = await faction_manager.list_active_factions(interaction.guild_id)
+        faction_names = {f["faction_id"]: f["name"] for f in factions}
+
+        items = [
+            {
+                "x": tile["x"],
+                "y": tile["y"],
+                "biome": tile["biome"],
+                "owner_name": (
+                    faction_names.get(tile["owner_faction_id"], "Unknown")
+                    if tile["owner_faction_id"]
+                    else "Unclaimed"
+                ),
+            }
+            for tile in candidates
+        ]
+        items.sort(key=lambda item: (item["owner_name"], item["y"], item["x"]))
+
+        await interaction.response.send_message(
+            f"Choose a frontier tile for **{faction['name']}**. "
+            "You will choose the militia force after selecting the target.",
+            view=ConquestView(interaction.user.id, items),
+            ephemeral=True,
+        )
+
+    @military_group.command(
+        name="attack",
+        description="Attack another faction, then choose the militia force to commit.",
+    )
+    async def attack(
+        self,
+        interaction: discord.Interaction,
+        target_faction: str,
+    ):
+        if not await faction_manager.get_member_faction(
+            interaction.guild_id,
+            interaction.user.id,
+        ):
+            await interaction.response.send_message(
+                "You must be in a faction to attack.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            AttackMilitiaModal(
+                interaction.guild_id,
+                interaction.user.id,
+                target_faction,
+            )
+        )
 
 
 async def setup(bot: commands.Bot):

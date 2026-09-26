@@ -1,7 +1,7 @@
 # Faction Empires — Discord Economy & Faction Simulator
 
 A Discord bot that turns your server into a persistent map of player-run factions:
-procedurally generated terrain, a daily economic tick, warfare, diplomacy, and
+a 96x96 procedurally generated terrain map, a daily economic tick, warfare, diplomacy, and
 leaderboards. Built with `discord.py`, SQLite (via `aiosqlite`), and a
 Perlin/Simplex-based terrain generator.
 
@@ -25,8 +25,11 @@ Perlin/Simplex-based terrain generator.
   money based on biome (plains are food-rich, mountains are money-rich via
   mining, etc.) and worker count. Inhabitants consume food each tick.
   - Food too scarce → starvation deaths (workers die first).
+  - Food surplus → natural worker births, with a convex growth curve capped at 5% per simulated day.
+  - Workers also have a small baseline natural mortality rate.
   - Money too scarce (low money-per-capita) → workers emigrate to the
     richest faction in the same server.
+  - Faction info exposes food stock, production, consumption, militia upkeep, net food and reserve duration.
   - The tick interval is configurable per server (`/admin set_tick_hours`,
     default 24h) and runs automatically in the background.
 - **Map memory** — every tick stores a compressed snapshot of full tile
@@ -37,10 +40,9 @@ Perlin/Simplex-based terrain generator.
   plague, storm) striking a random spot on land, killing a portion of the
   inhabitants of whichever faction(s) it hits.
 - **Military** — convert workers to militia (`/military convert`), scout
-  adjacent tiles for intel (`/military scout`), conquer adjacent unclaimed or
-  enemy land (`/military conquer x y`) with terrain-dependent defense bonuses,
-  or attack another faction outright (`/military attack`) to plunder
-  treasury and capture territory. All actions have cooldowns.
+  choose adjacent frontier tiles through a Discord selector (`/military conquer`),
+  enter the exact militia force in a modal, or attack another faction with the
+  same explicit-force modal (`/military attack`). All military actions have cooldowns.
 - **Diplomacy** — propose/accept/break alliances (blocks attacks between the
   two factions) and trade pacts (`/diplomacy propose_alliance`,
   `propose_trade`, `accept`, `break`, `list`). Trade pacts can optionally
@@ -60,8 +62,12 @@ Perlin/Simplex-based terrain generator.
   into theirs, and your faction is dissolved — exactly the "incorporation"
   behavior requested.
 - **Wanderers** — anyone who talks to the bot while in no faction is a
-  "wanderer" sitting at a random map tile. The moment a faction conquers
-  that tile, the wanderer automatically becomes one of its decisioners.
+  "wanderer" sitting at a map tile. Wanderers can move one cardinal tile at a
+  time with `/map move`. The moment a faction conquers their tile, they
+  automatically become one of its decisioners.
+- **Population transfers** — faction leaders and officers can use
+  `/faction request_inhabitants` to request a number of workers from another
+  faction in exchange for food and/or money, with an accept/decline decision.
 - **Leader dashboard** — `/faction stats` (leader/officer only) shows
   inhabitants, land, food/money production per capita, and a 7-day history
   of inhabitants gained/lost.
@@ -79,8 +85,8 @@ added lightweight versions of each:
 - **Announcement channel** (`/admin set_announce_channel`) — the bot posts
   an automatic daily summary (production, deaths, migrations, disasters,
   and a fresh map image) to a channel of your choice.
-- **Cooldowns** on attack/conquer/scout to prevent action-spamming a single
-  faction to death in seconds.
+- **Cooldowns** on attack/conquer to prevent action-spamming a single faction
+to death in seconds.
 - **Militia upkeep** — militia cost extra food & money to maintain, so
   players face a real guns-vs-butter tradeoff instead of converting every
   worker to militia for free.
@@ -101,7 +107,7 @@ world/
   map_manager.py         persistence, ownership, snapshots, PNG rendering, disasters
 factions/manager.py      faction CRUD, colors, membership, leadership transfer/merge
 economy/simulation.py    the daily tick: production, starvation, migration, stats
-military/manager.py      militia, scouting, conquest, attacks
+military/manager.py      militia, conquest, attacks
 diplomacy/manager.py     alliances & trade pacts
 leaderboards.py          server + global leaderboard queries
 cogs/                    one file per Discord slash-command group
@@ -144,7 +150,7 @@ test_offline.py          full game-loop smoke test with NO Discord connection ne
 
 `test_offline.py` exercises the entire simulation (world generation,
 faction creation + color rejection, invites, wanderers, several economic
-ticks, militia/scouting/conquest, diplomacy + alliance-blocks-attack,
+ticks, militia/conquest, inhabitant transfer, diplomacy + alliance-blocks-attack,
 leadership handoff, faction merging, and leaderboards) purely against the
 SQLite layer, with no Discord connection required:
 

@@ -66,6 +66,23 @@ async def main():
     print("\n== Wanderer check ==")
     frank_member = await faction_manager.get_member(GUILD_ID, USERS["frank"])
     print(f"Frank is a wanderer at ({frank_member['wander_x']}, {frank_member['wander_y']})")
+    try:
+        moved = await faction_manager.move_wanderer(GUILD_ID, USERS["frank"], "east")
+        print(f"Frank moved east to ({moved['x']},{moved['y']})")
+    except faction_manager.FactionError as e:
+        print(f"Frank could not move east: {e}")
+
+    print("\n== Inhabitant transfer ==")
+    request = await faction_manager.create_inhabitant_request(
+        GUILD_ID, USERS["alice"], "Bluewater", 5, food_offer=20, treasury_offer=10
+    )
+    transfer = await faction_manager.resolve_inhabitant_request(
+        GUILD_ID, USERS["bob"], request["request_id"], True
+    )
+    print(
+        f"Transferred {transfer['request']['inhabitants']} workers from "
+        f"{transfer['donor']['name']} to {transfer['requester']['name']}"
+    )
 
     print("\n== Running 5 economic ticks ==")
     for _ in range(5):
@@ -78,23 +95,27 @@ async def main():
             print(f"   {d['name']}: food+{d['food_prod']:.1f} money+{d['money_prod']:.1f} "
                   f"deaths={d['deaths']} migration={d['migration']}")
 
-    print("\n== Military: convert, scout, conquer ==")
+    print("\n== Military: convert and conquer ==")
     faction1 = await faction_manager.get_faction_by_id(f1["faction_id"])
     print(f"Redcliff workers before: {faction1['worker_count']}")
     await military_manager.convert_to_militia(GUILD_ID, USERS["alice"], 10)
     faction1 = await faction_manager.get_faction_by_id(f1["faction_id"])
     print(f"Redcliff militia after conversion: {faction1['militia_count']}")
 
-    scout_result = await military_manager.scout(GUILD_ID, USERS["alice"])
-    print(f"Scout found {len(scout_result['intel'])} tiles:")
-    for t in scout_result["intel"][:5]:
-        print(f"   ({t['x']},{t['y']}) {t['biome']} owner={t['owner']}")
-
-    if scout_result["intel"]:
-        target = scout_result["intel"][0]
-        conquer_result = await military_manager.conquer(GUILD_ID, USERS["alice"], target["x"], target["y"])
-        print(f"Conquer attempt on ({target['x']},{target['y']}): success={conquer_result['success']} "
-              f"chance={conquer_result['chance']:.2f} militia_lost={conquer_result['militia_lost']}")
+    candidates = await map_manager.get_adjacent_unclaimed_or_enemy(
+        GUILD_ID, f1["faction_id"]
+    )
+    if candidates:
+        target = candidates[0]
+        conquer_result = await military_manager.conquer(
+            GUILD_ID, USERS["alice"], target["x"], target["y"], 3
+        )
+        print(
+            f"Conquer attempt on ({target['x']},{target['y']}): "
+            f"success={conquer_result['success']} "
+            f"chance={conquer_result['chance']:.2f} "
+            f"militia_lost={conquer_result['militia_lost']}"
+        )
 
     print("\n== Diplomacy: alliance ==")
     await diplomacy_manager.propose(GUILD_ID, USERS["alice"], "Bluewater", "alliance")

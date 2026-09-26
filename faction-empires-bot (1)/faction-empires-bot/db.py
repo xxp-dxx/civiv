@@ -117,6 +117,20 @@ CREATE TABLE IF NOT EXISTS cooldowns (
     last_used_at TEXT NOT NULL,
     PRIMARY KEY (faction_id, action)
 );
+
+CREATE TABLE IF NOT EXISTS inhabitant_requests (
+    request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    requester_faction_id INTEGER NOT NULL,
+    donor_faction_id INTEGER NOT NULL,
+    inhabitants INTEGER NOT NULL,
+    food_offer REAL NOT NULL DEFAULT 0,
+    treasury_offer REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inhabitant_requests_target
+    ON inhabitant_requests(guild_id, donor_faction_id, status);
 """
 
 _connection: aiosqlite.Connection | None = None

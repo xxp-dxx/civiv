@@ -77,10 +77,17 @@ class FactionBot(commands.Bot):
             lines.append(f"💥 {d['label']} struck near ({d['x']},{d['y']}) — {d['casualties']} lives lost.")
         for fid, data in summary["factions"].items():
             bits = [f"+{data['food_prod']:.0f} 🌾", f"+{data['money_prod']:.0f} 💰"]
-            if data["deaths"]:
-                bits.append(f"-{data['deaths']} starved")
+            if data["births"]:
+                bits.append(f"+{data['births']} born")
+            if data["natural_deaths"]:
+                bits.append(f"-{data['natural_deaths']} natural deaths")
+            if data["deaths"] - data["natural_deaths"]:
+                bits.append(f"-{data['deaths'] - data['natural_deaths']} starved")
             if data["migration"]:
                 bits.append(f"{data['migration']:+d} migration")
+            bits.append(f"🌾 {data['food_stock']:.0f} stock")
+            if data["crisis"]:
+                bits.append("⚠️ crisis")
             lines.append(f"**{data['name']}**: " + ", ".join(bits))
 
         try:

@@ -36,6 +36,7 @@ class AdminCog(commands.Cog):
             await db.execute("DELETE FROM diplomacy WHERE guild_id=?", (interaction.guild_id,))
             await db.execute("DELETE FROM disasters_log WHERE guild_id=?", (interaction.guild_id,))
             await db.execute("DELETE FROM events_log WHERE guild_id=?", (interaction.guild_id,))
+            await db.execute("DELETE FROM inhabitant_requests WHERE guild_id=?", (interaction.guild_id,))
 
         used_seed, w, h = await map_manager.generate_world(interaction.guild_id, seed)
         png = await map_manager.render_map_png(interaction.guild_id)
