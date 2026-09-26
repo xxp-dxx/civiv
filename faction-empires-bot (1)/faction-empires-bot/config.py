@@ -63,6 +63,9 @@ STARVATION_DEATH_RATE = 0.02
 # to the richest faction in the same guild with better money-per-capita.
 NATURAL_GROWTH_MAX_RATE = 0.05
 NATURAL_GROWTH_CURVE_EXPONENT = 2.5
+NATURAL_GROWTH_RESERVE_DAYS = 7       # a week of food reserves fully supports the growth baseline
+NATURAL_GROWTH_DEFICIT_TOLERANCE = 0.25  # temporary food deficits still allow slow growth while reserves remain
+NATURAL_GROWTH_BASE_FACTOR = 0.25       # growth floor before reserves run out
 NATURAL_DEATH_RATE = 0.002       # 0.2% of workers per simulated day, stochastic
 
 POVERTY_MONEY_PER_CAPITA_THRESHOLD = 0.15
