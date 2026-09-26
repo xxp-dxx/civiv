@@ -22,3 +22,5 @@ jobs:
         with:
           name: civiv-bot-package
           path: civiv-bot.zip
+
+      # Force a fresh packaging run after the initial workflow creation commit.
