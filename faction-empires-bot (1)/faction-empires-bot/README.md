@@ -39,8 +39,8 @@ Perlin/Simplex-based terrain generator.
   (10% by default) chance of a random disaster (earthquake, flood, wildfire,
   plague, storm) striking a random spot on land, killing a portion of the
   inhabitants of whichever faction(s) it hits.
-- **Military** — convert workers to militia (`/military convert`), scout
-  choose adjacent frontier tiles through a Discord selector (`/military conquer`),
+- **Military** — convert workers to militia (`/military convert`), choose
+  adjacent frontier tiles through a Discord selector (`/military conquer`),
   enter the exact militia force in a modal, or attack another faction with the
   same explicit-force modal (`/military attack`). All military actions have cooldowns.
 - **Diplomacy** — propose/accept/break alliances (blocks attacks between the
