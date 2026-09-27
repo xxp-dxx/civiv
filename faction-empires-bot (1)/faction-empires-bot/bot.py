@@ -44,7 +44,7 @@ class FactionBot(commands.Bot):
         await self.tree.sync()
         self.tick_loop.start()
 
-    @tasks.loop(minutes=5)
+    @tasks.loop(minutes=1)
     async def tick_loop(self):
         """Checks every guild's world and advances any that are due for their next day."""
         rows = await db.fetchall("SELECT * FROM guild_config")
