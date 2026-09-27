@@ -9,68 +9,84 @@ from world import map_manager
 
 class ConquestMilitiaModal(discord.ui.Modal, title="Conquest Force"):
     militia = discord.ui.TextInput(
-        label="Militia to commit",
-        placeholder="Enter the exact number of militia to commit",
+        label="Militia per tile",
+        placeholder="Enter the exact militia force for each selected tile",
         min_length=1,
         max_length=8,
         required=True,
     )
 
-    def __init__(self, guild_id: int, user_id: int, x: int, y: int):
+    def __init__(
+        self,
+        guild_id: int,
+        user_id: int,
+        targets: list[tuple[int, int]],
+    ):
         super().__init__()
         self.guild_id = guild_id
         self.user_id = user_id
-        self.x = x
-        self.y = y
+        self.targets = targets
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             amount = int(str(self.militia.value).strip())
-            result = await military_manager.conquer(
+            results = await military_manager.conquer_multiple(
                 self.guild_id,
                 self.user_id,
-                self.x,
-                self.y,
+                self.targets,
                 amount,
             )
         except (ValueError, military_manager.MilitaryError) as e:
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
             return
 
-        if result["success"]:
-            message = (
-                f"🏴 **Success.** Tile ({self.x},{self.y}) [{result['tile']['biome']}] "
-                f"is now yours. Committed {result['militia_committed']} militia; "
-                f"lost {result['militia_lost']}."
-            )
-            if result.get("wanderers_joined"):
-                message += (
-                    f"\n{len(result['wanderers_joined'])} wanderer(s) on that tile "
-                    "joined your faction."
-                )
-        else:
-            message = (
-                f"💀 **Failed.** Tile ({self.x},{self.y}) was not conquered. "
-                f"Committed {result['militia_committed']} militia; lost {result['militia_lost']}. "
-                f"Estimated success chance: {result['chance'] * 100:.0f}%."
-            )
+        successes = [r for r in results if r["success"]]
+        total_lost = sum(r["militia_lost"] for r in results)
+        lines = [
+            f"🏴 **Conquest resolved:** {len(successes)}/{len(results)} tile(s) conquered.",
+            f"Committed {amount} militia per tile; lost {total_lost} total.",
+        ]
 
-        await interaction.response.send_message(message)
+        for result in results:
+            x, y = result["tile"]["x"], result["tile"]["y"]
+            if result["success"]:
+                lines.append(
+                    f"• ({x},{y}) [{result['tile']['biome']}] **success** — "
+                    f"{result['militia_lost']} militia lost."
+                )
+                if result.get("wanderers_joined"):
+                    lines.append(
+                        f"  {len(result['wanderers_joined'])} wanderer(s) joined your faction."
+                    )
+            else:
+                lines.append(
+                    f"• ({x},{y}) [{result['tile']['biome']}] **failed** — "
+                    f"{result['militia_lost']} militia lost, "
+                    f"{result['chance'] * 100:.0f}% estimated chance."
+                )
+
+        await interaction.response.send_message("\n".join(lines))
 
 
 class ConquestView(discord.ui.View):
     PAGE_SIZE = 25
 
-    def __init__(self, owner_id: int, candidates: list[dict]):
+    def __init__(
+        self,
+        owner_id: int,
+        candidates: list[dict],
+        max_tiles: int,
+    ):
         super().__init__(timeout=120)
         self.owner_id = owner_id
         self.candidates = candidates
+        self.max_tiles = min(max_tiles, self.PAGE_SIZE)
         self.page = 0
 
         self.target_select = discord.ui.Select(
-            placeholder="Choose a frontier tile",
+            placeholder=f"Choose up to {self.max_tiles} frontier tile(s)",
             min_values=1,
-            max_values=1,
+            max_values=self.max_tiles,
         )
         self.add_item(self.target_select)
         self.target_select.callback = self._select_target
@@ -128,18 +144,18 @@ class ConquestView(discord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def _select_target(self, interaction: discord.Interaction):
-        raw = self.target_select.values[0]
-        x, y = (int(value) for value in raw.split(":", 1))
+        targets = [
+            tuple(int(value) for value in raw.split(":", 1))
+            for raw in self.target_select.values
+        ]
         self.stop()
         await interaction.response.send_modal(
             ConquestMilitiaModal(
                 interaction.guild_id,
                 interaction.user.id,
-                x,
-                y,
+                targets,
             )
         )
-
 
 class AttackMilitiaModal(discord.ui.Modal, title="Commit Attack Force"):
     militia = discord.ui.TextInput(
@@ -220,7 +236,7 @@ class MilitaryCog(commands.Cog):
 
     @military_group.command(
         name="conquer",
-        description="Choose an adjacent tile, then choose the militia force to commit.",
+        description="Choose one or more adjacent tiles, then choose the militia force per tile.",
     )
     async def conquer(self, interaction: discord.Interaction):
         faction = await faction_manager.get_member_faction(
@@ -238,6 +254,14 @@ class MilitaryCog(commands.Cog):
             interaction.guild_id,
             faction["faction_id"],
         )
+        max_tiles = military_manager.get_conquest_tile_limit(faction["militia_count"])
+        if max_tiles <= 0:
+            await interaction.response.send_message(
+                "You need at least 1 militia to conquer land.",
+                ephemeral=True,
+            )
+            return
+
         if not candidates:
             await interaction.response.send_message(
                 "There are no adjacent unclaimed or enemy tiles available.",
@@ -264,9 +288,9 @@ class MilitaryCog(commands.Cog):
         items.sort(key=lambda item: (item["owner_name"], item["y"], item["x"]))
 
         await interaction.response.send_message(
-            f"Choose a frontier tile for **{faction['name']}**. "
-            "You will choose the militia force after selecting the target.",
-            view=ConquestView(interaction.user.id, items),
+            f"Choose up to **{max_tiles}** frontier tile(s) for **{faction['name']}**. "
+            "The limit scales logarithmically with your militia. You will choose the militia force per tile next.",
+            view=ConquestView(interaction.user.id, items, max_tiles),
             ephemeral=True,
         )
 
