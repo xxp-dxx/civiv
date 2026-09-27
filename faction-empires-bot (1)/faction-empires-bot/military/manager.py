@@ -62,24 +62,29 @@ async def convert_to_militia(guild_id: int, user_id: int, amount: int):
     return await faction_manager.get_faction_by_id(faction["faction_id"])
 
 
-async def conquer(guild_id: int, user_id: int, x: int, y: int, militia_committed: int):
-    faction = await _require_leader_or_officer(guild_id, user_id)
-    await _check_cooldown(faction["faction_id"], "conquer", config.CONQUER_COOLDOWN_HOURS)
-    tile = await db.fetchone(
-        "SELECT * FROM tiles WHERE guild_id=? AND x=? AND y=?", (guild_id, x, y)
-    )
-    if not tile:
-        raise MilitaryError("That tile does not exist on this map.")
-    if tile["biome"] == "ocean":
-        raise MilitaryError("You cannot conquer open ocean.")
-    if tile["owner_faction_id"] == faction["faction_id"]:
-        raise MilitaryError("You already own that tile.")
-    adjacent = await map_manager.get_adjacent_unclaimed_or_enemy(guild_id, faction["faction_id"])
-    if (x, y) not in {(t["x"], t["y"]) for t in adjacent}:
-        raise MilitaryError("You can only conquer land directly adjacent to your existing territory.")
-    if militia_committed <= 0 or militia_committed > faction["militia_count"]:
-        raise MilitaryError(f"Choose between 1 and {faction['militia_count']} militia to commit.")
+def get_conquest_tile_limit(militia_count: int) -> int:
+    """Return the maximum frontier tiles that can be targeted in one conquest cooldown.
 
+    The progression is logarithmic: 1 tile below 100 militia, then each additional
+    tile requires roughly twice as much militia, capped at 10 tiles.
+    """
+    import math
+
+    if militia_count <= 0:
+        return 0
+    extra_tiers = max(0, int(math.log2(militia_count / config.CONQUER_MILITIA_SCALE)))
+    return min(
+        config.CONQUER_MAX_TILES_PER_COOLDOWN,
+        max(config.CONQUER_MIN_TILES_PER_COOLDOWN, 1 + extra_tiers),
+    )
+
+
+async def _resolve_conquest_tile(
+    guild_id: int,
+    faction: dict,
+    tile: dict,
+    militia_committed: int,
+):
     defense_bonus = config.TERRAIN_DEFENSE_BONUS.get(tile["biome"], 0.0)
     is_contested = tile["owner_faction_id"] is not None
     defender_militia = 0
@@ -97,42 +102,123 @@ async def conquer(guild_id: int, user_id: int, x: int, y: int, militia_committed
         ),
     )
     success = random.random() < success_chance
-    await _set_cooldown(faction["faction_id"], "conquer")
 
     result = {
         "success": success,
         "chance": success_chance,
-        "tile": {"x": x, "y": y, "biome": tile["biome"]},
+        "tile": {"x": tile["x"], "y": tile["y"], "biome": tile["biome"]},
         "contested": is_contested,
         "militia_committed": militia_committed,
         "militia_lost": 0,
+        "wanderers_joined": [],
     }
+
     if success:
         await db.execute(
             "UPDATE tiles SET owner_faction_id=? WHERE guild_id=? AND x=? AND y=?",
-            (faction["faction_id"], guild_id, x, y),
+            (faction["faction_id"], guild_id, tile["x"], tile["y"]),
         )
         joined = await faction_manager.claim_wanderers_in_conquered_tiles(
-            guild_id, faction["faction_id"], [(x, y)]
+            guild_id, faction["faction_id"], [(tile["x"], tile["y"])]
         )
         result["wanderers_joined"] = joined
         casualty = random.randint(0, max(1, militia_committed // 4))
         await faction_manager.adjust_militia(faction["faction_id"], -casualty)
         result["militia_lost"] = casualty
         await faction_manager.log_event(
-            guild_id, faction["faction_id"],
-            f"Conquered tile ({x},{y}) [{tile['biome']}] with {militia_committed} militia committed.",
+            guild_id,
+            faction["faction_id"],
+            f"Conquered tile ({tile['x']},{tile['y']}) [{tile['biome']}] with "
+            f"{militia_committed} militia committed.",
         )
     else:
         casualty = random.randint(1, max(1, militia_committed // 2))
         await faction_manager.adjust_militia(faction["faction_id"], -casualty)
         result["militia_lost"] = casualty
         await faction_manager.log_event(
-            guild_id, faction["faction_id"],
-            f"Failed to conquer tile ({x},{y}), losing {casualty} of {militia_committed} committed militia.",
+            guild_id,
+            faction["faction_id"],
+            f"Failed to conquer tile ({tile['x']},{tile['y']}), losing "
+            f"{casualty} of {militia_committed} committed militia.",
         )
     return result
 
+
+async def conquer_multiple(
+    guild_id: int,
+    user_id: int,
+    targets: list[tuple[int, int]],
+    militia_per_tile: int,
+):
+    """Conquer several selected adjacent tiles in one cooldown window."""
+    faction = await _require_leader_or_officer(guild_id, user_id)
+    await _check_cooldown(
+        faction["faction_id"], "conquer", config.CONQUER_COOLDOWN_HOURS
+    )
+
+    unique_targets = list(dict.fromkeys(targets))
+    if not unique_targets:
+        raise MilitaryError("Choose at least one frontier tile.")
+
+    max_tiles = get_conquest_tile_limit(faction["militia_count"])
+    if len(unique_targets) > max_tiles:
+        raise MilitaryError(
+            f"Your {faction['militia_count']} militia currently allows up to "
+            f"{max_tiles} tile(s) per conquest cooldown."
+        )
+
+    if militia_per_tile <= 0:
+        raise MilitaryError("Choose a positive number of militia per tile.")
+
+    total_required = militia_per_tile * len(unique_targets)
+    if total_required > faction["militia_count"]:
+        raise MilitaryError(
+            f"That force would require {total_required} militia, but you only have "
+            f"{faction['militia_count']}."
+        )
+
+    adjacent = await map_manager.get_adjacent_unclaimed_or_enemy(
+        guild_id, faction["faction_id"]
+    )
+    adjacent_by_xy = {(t["x"], t["y"]): t for t in adjacent}
+
+    tiles = []
+    for x, y in unique_targets:
+        tile = await db.fetchone(
+            "SELECT * FROM tiles WHERE guild_id=? AND x=? AND y=?",
+            (guild_id, x, y),
+        )
+        if not tile:
+            raise MilitaryError(f"Tile ({x},{y}) does not exist on this map.")
+        if tile["biome"] == "ocean":
+            raise MilitaryError(f"Tile ({x},{y}) is open ocean.")
+        if tile["owner_faction_id"] == faction["faction_id"]:
+            raise MilitaryError(f"You already own tile ({x},{y}).")
+        if (x, y) not in adjacent_by_xy:
+            raise MilitaryError(
+                f"Tile ({x},{y}) is not directly adjacent to your territory."
+            )
+        tiles.append(tile)
+
+    await _set_cooldown(faction["faction_id"], "conquer")
+
+    return [
+        await _resolve_conquest_tile(
+            guild_id, faction, tile, militia_per_tile
+        )
+        for tile in tiles
+    ]
+
+
+async def conquer(guild_id: int, user_id: int, x: int, y: int, militia_committed: int):
+    """Backward-compatible single-tile conquest wrapper."""
+    results = await conquer_multiple(
+        guild_id,
+        user_id,
+        [(x, y)],
+        militia_committed,
+    )
+    return results[0]
 
 async def attack_faction(guild_id: int, user_id: int, target_faction_name: str, militia_committed: int):
     faction = await _require_leader_or_officer(guild_id, user_id)
