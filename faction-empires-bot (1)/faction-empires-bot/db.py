@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS guild_config (
     day_count       INTEGER NOT NULL DEFAULT 0,
     last_tick_at    TEXT,
     announce_channel_id INTEGER,
-    tick_hours      REAL NOT NULL DEFAULT 24.0
+    tick_hours      REAL NOT NULL DEFAULT 0.3333333333
 );
 
 CREATE TABLE IF NOT EXISTS factions (
