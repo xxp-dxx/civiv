@@ -30,7 +30,7 @@ MOUNTAIN_LEVEL = 0.5
 PEAK_LEVEL = 0.72
 
 # --- Simulation tick ---
-DEFAULT_TICK_HOURS = 24.0       # how often the world advances one "day"
+DEFAULT_TICK_HOURS = 20.0 / 60.0  # one simulated day every 20 real-world minutes by default
 DISASTER_CHANCE = 0.10          # 10% chance per guild per tick
 
 # --- Economy ---
@@ -89,8 +89,11 @@ TERRAIN_DEFENSE_BONUS = {          # defender bonus by biome of the contested ti
     "desert": 0.05,
     "ocean": 1.0,  # effectively unconquerable
 }
-ATTACK_COOLDOWN_HOURS = 12
-CONQUER_COOLDOWN_HOURS = 6
+ATTACK_COOLDOWN_HOURS = DEFAULT_TICK_HOURS
+CONQUER_COOLDOWN_HOURS = DEFAULT_TICK_HOURS
+CONQUER_MIN_TILES_PER_COOLDOWN = 1
+CONQUER_MAX_TILES_PER_COOLDOWN = 10
+CONQUER_MILITIA_SCALE = 50  # 100 militia -> 2 tiles, 200 -> 3, 400 -> 4, ...
 
 # --- Misc ---
 EMBED_COLOR_DEFAULT = 0x2ECC71
