@@ -29,6 +29,26 @@ USERS = {
 
 
 async def main():
+    print("== Conquest scaling checks ==")
+    assert abs(config.DEFAULT_TICK_HOURS - (20 / 60)) < 1e-9
+    expected_tiers = {
+        40: 1,
+        99: 1,
+        100: 2,
+        199: 2,
+        200: 3,
+        400: 4,
+        800: 5,
+        1600: 6,
+        3200: 7,
+        6400: 8,
+        12800: 9,
+        25600: 10,
+    }
+    for militia, expected in expected_tiers.items():
+        actual = military_manager.get_conquest_tile_limit(militia)
+        assert actual == expected, (militia, actual, expected)
+    print("OK: 20-minute default day and logarithmic conquest tiers")
     await db.init_db()
     print("== Generating world ==")
     seed, w, h = await map_manager.generate_world(GUILD_ID, seed=42)
