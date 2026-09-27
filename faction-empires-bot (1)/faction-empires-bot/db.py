@@ -142,6 +142,12 @@ async def init_db():
     _connection = await aiosqlite.connect(config.DB_PATH)
     _connection.row_factory = aiosqlite.Row
     await _connection.executescript(SCHEMA)
+    # Migrate worlds created under the old 24-hour default to the new default.
+    # Explicitly customized intervals remain unchanged.
+    await _connection.execute(
+        "UPDATE guild_config SET tick_hours=? WHERE tick_hours=24.0",
+        (config.DEFAULT_TICK_HOURS,),
+    )
     await _connection.commit()
     return _connection
 
