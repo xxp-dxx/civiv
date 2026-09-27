@@ -1,7 +1,7 @@
 # Faction Empires — Discord Economy & Faction Simulator
 
 A Discord bot that turns your server into a persistent map of player-run factions:
-a 96x96 procedurally generated terrain map, a daily economic tick, warfare, diplomacy, and
+a 96x96 procedurally generated terrain map, a 20-minute default economic day, warfare, diplomacy, and
 leaderboards. Built with `discord.py`, SQLite (via `aiosqlite`), and a
 Perlin/Simplex-based terrain generator.
 
@@ -39,10 +39,11 @@ Perlin/Simplex-based terrain generator.
   (10% by default) chance of a random disaster (earthquake, flood, wildfire,
   plague, storm) striking a random spot on land, killing a portion of the
   inhabitants of whichever faction(s) it hits.
-- **Military** — convert workers to militia (`/military convert`), choose
-  adjacent frontier tiles through a Discord selector (`/military conquer`),
-  enter the exact militia force in a modal, or attack another faction with the
-  same explicit-force modal (`/military attack`). All military actions have cooldowns.
+- **Military** — convert workers to militia (`/military convert`), select one or more
+  adjacent frontier tiles through a Discord selector (`/military conquer`), and enter
+  the exact militia force per tile. Conquest capacity scales logarithmically with
+  militia, from 1 tile per cooldown up to 10. Attacks use the same explicit-force
+  modal (`/military attack`).
 - **Diplomacy** — propose/accept/break alliances (blocks attacks between the
   two factions) and trade pacts (`/diplomacy propose_alliance`,
   `propose_trade`, `accept`, `break`, `list`). Trade pacts can optionally
