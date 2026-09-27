@@ -31,7 +31,7 @@ Perlin/Simplex-based terrain generator.
     richest faction in the same server.
   - Faction info exposes food stock, production, consumption, militia upkeep, net food and reserve duration.
   - The tick interval is configurable per server (`/admin set_tick_hours`,
-    default 24h) and runs automatically in the background.
+    default 20 minutes) and runs automatically in the background.
 - **Map memory** — every tick stores a compressed snapshot of full tile
   ownership/biome state (`/map history`, `/map snapshot <day>`), so you can
   look back at how the world looked and who owned what on any past day.
